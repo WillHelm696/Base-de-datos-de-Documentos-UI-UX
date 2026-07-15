@@ -1,8 +1,16 @@
 import os
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+import sys
+import json
 
-# Importamos la lógica que construiste con tu equipo
+# Corrección dinámica del path para desarrollo local
+root_path = os.path.abspath(os.path.dirname(__file__))
+if root_path not in sys.path:
+    sys.path.insert(0, root_path)
+
+from PyQt6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from src.gui_view import SearchEngineView
+
+# Importaciones del motor analítico
 from src.preprocessor import preprocess_text
 from src.indexer import build_inverted_index
 from src.tfidf import calculate_tfidf_for_all, calculate_tf, calculate_tfidf
@@ -11,100 +19,66 @@ from src.database import save_database, load_database
 from src.utils import load_documents, validate_directory
 
 DB_PATH = "data/database.json"
+CONFIG_PATH = "data/config.json"  # <--- Ruta para almacenar las preferencias
 
 
-class SearchEngineGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Motor de Búsqueda Semántica - TF-IDF")
-        self.root.geometry("650x550")
-        self.root.minsize(550, 450)
+class SearchEngineController(SearchEngineView):
+    def __init__(self):
+        super().__init__()
 
-        # Variable para almacenar la ruta seleccionada
-        self.selected_directory = tk.StringVar()
+        self.current_results_mapping = {}
+        self.loaded_documents_cache = {}
 
-        self.create_widgets()
+        # Conectar las señales y acciones (Eventos)
+        self.btn_browse.clicked.connect(self.handle_browse)
+        self.btn_create_db.clicked.connect(self.handle_create_db)
+        self.btn_search.clicked.connect(self.handle_search)
+        self.entry_query.returnPressed.connect(self.handle_search)
+        self.list_results.currentTextChanged.connect(self.handle_preview_change)
 
-    def create_widgets(self):
-        # --- SECCIÓN 1: INDEXACIÓN ---
-        frame_index = ttk.LabelFrame(self.root, text=" 1. Configuración de Base de Datos ", padding=15)
-        frame_index.pack(fill="x", padx=15, pady=10)
+        # Cargar las preferencias guardadas apenas se inicializa la app
+        self.load_preferences()
 
-        lbl_dir = ttk.Label(frame_index, text="Carpeta de Documentos (PDF, DOCX, TXT):")
-        lbl_dir.pack(anchor="w", pady=2)
+    def load_preferences(self):
+        """Carga la última carpeta guardada en el archivo JSON si existe."""
+        if os.path.exists(CONFIG_PATH):
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    last_dir = config.get("last_directory", "")
 
-        # Sub-frame para alinear el campo de texto y el botón de examinar
-        frame_path = ttk.Frame(frame_index)
-        frame_path.pack(fill="x", pady=5)
+                    # Validamos que la carpeta guardada aún exista físicamente en el disco
+                    if last_dir and os.path.isdir(last_dir):
+                        self.entry_dir.setText(last_dir)
+            except Exception as e:
+                print(f"No se pudieron cargar las preferencias: {e}")
 
-        entry_dir = ttk.Entry(frame_path, textvariable=self.selected_directory)
-        entry_dir.pack(side="left", fill="x", expand=True, padx=(0, 5))
+    def save_preferences(self, directory_path):
+        """Guarda la ruta del directorio seleccionado en el archivo JSON dentro de data/."""
+        try:
+            # Asegura que la carpeta 'data/' exista antes de escribir el archivo
+            os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
 
-        btn_browse = ttk.Button(frame_path, text="Examinar...", command=self.browse_directory)
-        btn_browse.pack(side="right")
+            config_data = {"last_directory": directory_path}
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(config_data, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"No se pudieron guardar las preferencias: {e}")
 
-        btn_create_db = ttk.Button(frame_index, text="Indexar y Crear Base de Datos", command=self.create_db_action)
-        btn_create_db.pack(fill="x", pady=(10, 0))
-
-        # --- SECCIÓN 2: BÚSQUEDA ---
-        frame_search = ttk.LabelFrame(self.root, text=" 2. Panel de Búsqueda Semántica ", padding=15)
-        frame_search.pack(fill="both", expand=True, padx=15, pady=10)
-
-        lbl_query = ttk.Label(frame_search, text="Escribe tu consulta o palabras clave:")
-        lbl_query.pack(anchor="w", pady=2)
-
-        frame_query_input = ttk.Frame(frame_search)
-        frame_query_input.pack(fill="x", pady=5)
-
-        self.entry_query = ttk.Entry(frame_query_input)
-        self.entry_query.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        # Permite ejecutar la búsqueda al presionar la tecla Enter
-        self.entry_query.bind("<Return>", lambda event: self.search_db_action())
-
-        btn_search = ttk.Button(frame_query_input, text="Buscar", command=self.search_db_action)
-        btn_search.pack(side="right")
-
-        # --- SECCIÓN 3: RESULTADOS ---
-        lbl_results = ttk.Label(frame_search, text="Resultados obtenidos (Ordenados por relevancia):")
-        lbl_results.pack(anchor="w", pady=(10, 2))
-
-        # Listbox con scrollbar para mostrar los resultados cómodamente
-        frame_list = ttk.Frame(frame_search)
-        frame_list.pack(fill="both", expand=True)
-
-        scrollbar = ttk.Scrollbar(frame_list, orient="vertical")
-        self.listbox_results = tk.Listbox(
-            frame_list,
-            yscrollcommand=scrollbar.set,
-            font=("Courier New", 10),
-            activestyle="none"
-        )
-        scrollbar.config(command=self.listbox_results.yview)
-
-        scrollbar.pack(side="right", fill="y")
-        self.listbox_results.pack(side="left", fill="both", expand=True)
-
-    def browse_directory(self):
-        """Abre una ventana emergente nativa para seleccionar carpetas."""
-        directory = filedialog.askdirectory(title="Selecciona la carpeta con tus documentos")
+    def handle_browse(self):
+        directory = QFileDialog.getExistingDirectory(self, "Selecciona la carpeta con tus documentos")
         if directory:
-            self.selected_directory.set(directory)
+            self.entry_dir.setText(directory)
+            # Guardamos la preferencia inmediatamente cuando el usuario selecciona una carpeta con éxito
+            self.save_preferences(directory)
 
-    def create_db_action(self):
-        """Orquesta la lectura e indexación de los documentos."""
-        local_path = self.selected_directory.get().strip()
-
-        if not local_path:
-            messagebox.showwarning("Advertencia", "Por favor, selecciona una carpeta primero.")
-            return
-
-        if not validate_directory(local_path):
-            messagebox.showerror("Error",
-                                 f"La carpeta seleccionada no existe o no contiene archivos válidos (.txt, .pdf, .docx).")
+    def handle_create_db(self):
+        local_path = self.entry_dir.text().strip()
+        if not local_path or not validate_directory(local_path):
+            QMessageBox.critical(self, "Error", "Ruta inválida o sin archivos (.txt, .pdf, .docx).")
             return
 
         try:
-            # Reutilizamos la lógica exacta de tu motor
             documents = load_documents(local_path)
             inverted_index, _ = build_inverted_index(documents)
             tfidf_vectors = calculate_tfidf_for_all(documents, inverted_index)
@@ -113,62 +87,71 @@ class SearchEngineGUI:
             idf_global = calculate_idf(inverted_index, len(documents))
 
             save_database(inverted_index, tfidf_vectors, idf_global, documents, DB_PATH)
+            self.loaded_documents_cache = documents
 
-            messagebox.showinfo("Éxito",
-                                f"¡Base de datos creada exitosamente!\nSe procesaron {len(documents)} documentos.")
+            # Guardamos la preferencia también al indexar por si el usuario editó la ruta a mano
+            self.save_preferences(local_path)
+
+            QMessageBox.information(self, "Éxito", f"Base de datos creada con {len(documents)} archivos.")
         except Exception as e:
-            messagebox.showerror("Error Crítico", f"Ocurrió un error al indexar: {e}")
+            QMessageBox.critical(self, "Error Crítico", f"Error al indexar: {e}")
 
-    def search_db_action(self):
-        """Ejecuta la búsqueda semántica y despliega los resultados en la lista."""
-        query_text = self.entry_query.get().strip()
-        self.listbox_results.delete(0, tk.END)  # Limpiar resultados anteriores
+    def handle_search(self):
+        query_text = self.entry_query.text().strip()
+        self.list_results.clear()
+        self.text_preview.clear()
+        self.current_results_mapping.clear()
 
         if not query_text:
-            messagebox.showwarning("Advertencia", "Escribe algo en el cuadro de búsqueda.")
             return
 
         if not os.path.exists(DB_PATH):
-            messagebox.showerror("Error", "No existe ninguna base de datos indexada. Por favor, crea una en el paso 1.")
+            QMessageBox.warning(self, "Error", "Debes inicializar la base de datos primero.")
             return
 
         try:
-            # 1. Carga
             inverted_index, tfidf_vectors, idf_global, documents = load_database(DB_PATH)
+            self.loaded_documents_cache = documents
 
-            # 2. Vectorización de la consulta
             query_tokens = preprocess_text(query_text)
             if not query_tokens:
-                self.listbox_results.insert(tk.END, " La consulta solo contenía palabras vacías (stop-words).")
+                self.list_results.addItem("La consulta solo contiene conectores o stop-words.")
                 return
 
             query_tf = calculate_tf(query_tokens)
             query_tfidf = calculate_tfidf(query_tf, idf_global)
-
-            # 3. Similitud
             ranked_docs = rank_documents(query_tfidf, tfidf_vectors)
 
-            # 4. Renderizado en la interfaz
-            coincidencias = 0
+            has_matches = False
             if ranked_docs and ranked_docs[0][1] > 0:
                 for doc_id, similarity in ranked_docs:
                     if similarity > 0:
-                        coincidencias += 1
-                        # Formateamos con espaciado limpio para simular columnas
-                        linea = f"[{similarity:.4f}] -> {doc_id}"
-                        self.listbox_results.insert(tk.END, linea)
+                        has_matches = True
+                        display_text = f"[{similarity:.4f}] - {doc_id}"
+                        self.list_results.addItem(display_text)
+                        self.current_results_mapping[display_text] = doc_id
 
-            if coincidencias == 0:
-                self.listbox_results.insert(tk.END, " [!] No se encontraron documentos relevantes.")
+            if not has_matches:
+                self.list_results.addItem("No se encontraron documentos correlativos.")
 
         except Exception as e:
-            messagebox.showerror("Error", f"Error en la consulta: {e}")
+            QMessageBox.critical(self, "Error", f"Error en la búsqueda: {e}")
+
+    def handle_preview_change(self, selected_item_text):
+        if not selected_item_text or selected_item_text not in self.current_results_mapping:
+            self.text_preview.clear()
+            return
+
+        real_doc_id = self.current_results_mapping[selected_item_text]
+        document_text = self.loaded_documents_cache.get(real_doc_id, "No se encontró el contenido del archivo.")
+        self.text_preview.setPlainText(document_text)
 
 
 def main():
-    root = tk.Tk()
-    app = SearchEngineGUI(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    controller = SearchEngineController()
+    controller.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
